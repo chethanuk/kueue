@@ -219,6 +219,56 @@ func TestMakeClusterQueueOrdering(t *testing.T) {
 			candidateCQs: []kueue.ClusterQueueReference{"left-cq", "right-cq"},
 			wantOrder:    []kueue.ClusterQueueReference{"left-cq", "right-cq"},
 		},
+		"sibling cohorts: higher DRS first, equal DRS in name order": {
+			// Five sibling Cohorts under root. cohort-e borrows the most
+			// (usage=4 > nominal=2), so it goes first even though it sorts last.
+			// The other four borrow the same amount (usage=3 > nominal=2), so
+			// their DRS ties and they are visited in Cohort name order.
+			// Cohorts are declared out of name order to rule out insertion order.
+			clusterQueues: []*kueue.ClusterQueue{
+				utiltestingapi.MakeClusterQueue("preemptor-cq").Cohort("root").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "10").Obj()).Obj(),
+				utiltestingapi.MakeClusterQueue("e-cq").Cohort("cohort-e").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "2").Obj()).Obj(),
+				utiltestingapi.MakeClusterQueue("c-cq").Cohort("cohort-c").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "2").Obj()).Obj(),
+				utiltestingapi.MakeClusterQueue("a-cq").Cohort("cohort-a").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "2").Obj()).Obj(),
+				utiltestingapi.MakeClusterQueue("d-cq").Cohort("cohort-d").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "2").Obj()).Obj(),
+				utiltestingapi.MakeClusterQueue("b-cq").Cohort("cohort-b").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "2").Obj()).Obj(),
+			},
+			cohorts: []*kueue.Cohort{
+				utiltestingapi.MakeCohort("root").Obj(),
+				utiltestingapi.MakeCohort("cohort-e").Parent("root").Obj(),
+				utiltestingapi.MakeCohort("cohort-c").Parent("root").Obj(),
+				utiltestingapi.MakeCohort("cohort-a").Parent("root").Obj(),
+				utiltestingapi.MakeCohort("cohort-d").Parent("root").Obj(),
+				utiltestingapi.MakeCohort("cohort-b").Parent("root").Obj(),
+			},
+			admitted: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("e1", "ns").Request(corev1.ResourceCPU, "4").
+					SimpleReserveQuota("e-cq", "default", now).Obj(),
+				*utiltestingapi.MakeWorkload("c1", "ns").Request(corev1.ResourceCPU, "3").
+					SimpleReserveQuota("c-cq", "default", now).Obj(),
+				*utiltestingapi.MakeWorkload("a1", "ns").Request(corev1.ResourceCPU, "3").
+					SimpleReserveQuota("a-cq", "default", now).Obj(),
+				*utiltestingapi.MakeWorkload("d1", "ns").Request(corev1.ResourceCPU, "3").
+					SimpleReserveQuota("d-cq", "default", now).Obj(),
+				*utiltestingapi.MakeWorkload("b1", "ns").Request(corev1.ResourceCPU, "3").
+					SimpleReserveQuota("b-cq", "default", now).Obj(),
+			},
+			preemptorCQ:  "preemptor-cq",
+			candidateCQs: []kueue.ClusterQueueReference{"a-cq", "b-cq", "c-cq", "d-cq", "e-cq"},
+			wantOrder:    []kueue.ClusterQueueReference{"e-cq", "a-cq", "b-cq", "c-cq", "d-cq"},
+		},
 		"CQ borrowing only on uncontested flavor is pruned": {
 			clusterQueues: []*kueue.ClusterQueue{
 				utiltestingapi.MakeClusterQueue("preemptor-cq").Cohort("root").

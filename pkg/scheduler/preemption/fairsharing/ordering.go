@@ -249,12 +249,16 @@ func (t *TargetClusterQueueOrdering) nextTarget(cohort *schdcache.CohortSnapshot
 		// subtree, or a possible preemption within Preemptor
 		// CQ itself.  We will only prune such a Cohort if all
 		// of its children have been pruned.
-		if !t.isBorrowing(drs) && !t.onPathFromRootToPreemptorCQ(cohort) {
+		switch {
+		case !t.isBorrowing(drs) && !t.onPathFromRootToPreemptorCQ(cohort):
 			t.prunedCohorts.Insert(cohort)
 			if logV := t.log.V(6); logV.Enabled() {
 				logV.Info("Pruning Cohort during Target ordering", "cohort", cohort.GetName(), "drs", drs)
 			}
-		} else if schdcache.CompareDRS(drs, highestCohortDrs) >= 0 {
+		// break DRS ties on Cohort name so the same subtree is picked on every run.
+		case schdcache.CompareDRS(drs, highestCohortDrs) == 0 && (highestCohort == nil || cohort.GetName() < highestCohort.GetName()):
+			highestCohort = cohort
+		case schdcache.CompareDRS(drs, highestCohortDrs) == 1:
 			highestCohortDrs = drs
 			highestCohort = cohort
 		}
