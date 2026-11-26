@@ -2594,10 +2594,27 @@ func Test_GetResourceRequests(t *testing.T) {
 
 func TestChargesForClaimSpec(t *testing.T) {
 	mapper := NewResourceMapper()
-	if err := mapper.PopulateFromConfiguration([]configapi.DeviceClassMapping{{
-		Name:             "example.com/gpu",
-		DeviceClassNames: []corev1.ResourceName{"fast.example.com", "slow.example.com"},
-	}}); err != nil {
+	selector := resourcev1.DeviceSelector{CEL: &resourcev1.CELDeviceSelector{Expression: "true"}}
+	if err := mapper.PopulateFromConfiguration([]configapi.DeviceClassMapping{
+		{
+			Name:             "example.com/gpu",
+			DeviceClassNames: []corev1.ResourceName{"fast.example.com", "slow.example.com"},
+		},
+		{
+			Name:             "example.com/partition",
+			DeviceClassNames: []corev1.ResourceName{"counter.example.com"},
+			Sources: []configapi.DeviceClassSourceConfig{{
+				Counter: &configapi.DeviceClassCounterSource{Name: "memory", Driver: "test-driver", DeviceSelector: selector},
+			}},
+		},
+		{
+			Name:             "example.com/shared",
+			DeviceClassNames: []corev1.ResourceName{"capacity.example.com"},
+			Sources: []configapi.DeviceClassSourceConfig{{
+				Capacity: &configapi.DeviceClassCapacitySource{Name: "test-driver/memory", Driver: "test-driver", DeviceSelector: selector},
+			}},
+		},
+	}); err != nil {
 		t.Fatalf("PopulateFromConfiguration() = %v", err)
 	}
 
@@ -2605,10 +2622,10 @@ func TestChargesForClaimSpec(t *testing.T) {
 		spec         resourcev1.ResourceClaimSpec
 		featureGates map[featuregate.Feature]bool
 		// perLogicalResource is always allocated, so an empty map is the expectation
-		// when no prioritized list is charged; ToMap reports no class charges as nil.
-		wantLogical map[corev1.ResourceName]resources.Amount
-		wantClasses map[corev1.ResourceName]resources.Amount
-		wantErr     bool
+		// when nothing is charged.
+		wantLogical  map[corev1.ResourceName]resources.Amount
+		wantUnmapped corev1.ResourceName
+		wantErr      bool
 		// Set these when which error comes back is the point of the case, since
 		// several guards on this path reject the same spec for different reasons.
 		wantErrField string
@@ -2617,22 +2634,20 @@ func TestChargesForClaimSpec(t *testing.T) {
 		"exactly requests on one class add up": {
 			spec: utiltesting.NewResourceClaimSpecBuilder().
 				DeviceRequests(
-					testingdra.MakeDeviceRequest("r0", "gpu", 2).Obj(),
-					testingdra.MakeDeviceRequest("r1", "gpu", 3).Obj(),
+					testingdra.MakeDeviceRequest("r0", "fast.example.com", 2).Obj(),
+					testingdra.MakeDeviceRequest("r1", "fast.example.com", 3).Obj(),
 				).
 				Build(),
-			wantLogical: map[corev1.ResourceName]resources.Amount{},
-			wantClasses: map[corev1.ResourceName]resources.Amount{"gpu": resources.NewAmount(5)},
+			wantLogical: map[corev1.ResourceName]resources.Amount{"example.com/gpu": resources.NewAmount(5)},
 		},
 		"an exactly sum past MaxInt64 stays exact": {
 			spec: utiltesting.NewResourceClaimSpecBuilder().
 				DeviceRequests(
-					testingdra.MakeDeviceRequest("r0", "gpu", math.MaxInt64).Obj(),
-					testingdra.MakeDeviceRequest("r1", "gpu", math.MaxInt64).Obj(),
+					testingdra.MakeDeviceRequest("r0", "fast.example.com", math.MaxInt64).Obj(),
+					testingdra.MakeDeviceRequest("r1", "fast.example.com", math.MaxInt64).Obj(),
 				).
 				Build(),
-			wantLogical: map[corev1.ResourceName]resources.Amount{},
-			wantClasses: map[corev1.ResourceName]resources.Amount{"gpu": resources.NewAmount(math.MaxInt64).MulInt64(2)},
+			wantLogical: map[corev1.ResourceName]resources.Amount{"example.com/gpu": resources.NewAmount(math.MaxInt64).MulInt64(2)},
 		},
 		"with the gate off a prioritized list is still refused": {
 			spec: utiltesting.NewResourceClaimSpecBuilder().
@@ -2688,8 +2703,56 @@ func TestChargesForClaimSpec(t *testing.T) {
 				).
 				Build(),
 			featureGates: map[featuregate.Feature]bool{features.KueueDRAIntegrationPrioritizedList: true},
-			wantLogical:  map[corev1.ResourceName]resources.Amount{"example.com/gpu": resources.NewAmount(4)},
-			wantClasses:  map[corev1.ResourceName]resources.Amount{"fast.example.com": resources.NewAmount(2)},
+			wantLogical:  map[corev1.ResourceName]resources.Amount{"example.com/gpu": resources.NewAmount(6)},
+		},
+		"exactly on a mapped class is charged as its logical resource": {
+			spec: utiltesting.NewResourceClaimSpecBuilder().
+				DeviceRequests(
+					testingdra.MakeDeviceRequest("r0", "fast.example.com", 2).Obj(),
+					testingdra.MakeFirstAvailableRequest("r1", testingdra.MakeDeviceSubRequest("slow", "slow.example.com", 3).Obj()).Obj(),
+				).
+				Build(),
+			featureGates: map[featuregate.Feature]bool{features.KueueDRAIntegrationPrioritizedList: true},
+			wantLogical:  map[corev1.ResourceName]resources.Amount{"example.com/gpu": resources.NewAmount(5)},
+		},
+		"counter-backed exactly class is skipped with PartitionableDevices": {
+			spec: utiltesting.NewResourceClaimSpecBuilder().
+				DeviceRequests(testingdra.MakeDeviceRequest("r0", "counter.example.com", 2).Obj()).
+				Build(),
+			featureGates: map[featuregate.Feature]bool{features.KueueDRAIntegrationPartitionableDevices: true},
+			wantLogical:  map[corev1.ResourceName]resources.Amount{},
+		},
+		"capacity-backed exactly class is skipped with ConsumableCapacity": {
+			spec: utiltesting.NewResourceClaimSpecBuilder().
+				DeviceRequests(testingdra.MakeDeviceRequest("r0", "capacity.example.com", 2).Obj()).
+				Build(),
+			featureGates: map[featuregate.Feature]bool{features.KueueDRAIntegrationConsumableCapacity: true},
+			wantLogical:  map[corev1.ResourceName]resources.Amount{},
+		},
+		"counter-backed exactly class is charged by count without PartitionableDevices": {
+			spec: utiltesting.NewResourceClaimSpecBuilder().
+				DeviceRequests(testingdra.MakeDeviceRequest("r0", "counter.example.com", 2).Obj()).
+				Build(),
+			featureGates: map[featuregate.Feature]bool{features.KueueDRAIntegrationPartitionableDevices: false},
+			wantLogical:  map[corev1.ResourceName]resources.Amount{"example.com/partition": resources.NewAmount(2)},
+		},
+		"capacity-backed exactly class is charged by count without ConsumableCapacity": {
+			spec: utiltesting.NewResourceClaimSpecBuilder().
+				DeviceRequests(testingdra.MakeDeviceRequest("r0", "capacity.example.com", 2).Obj()).
+				Build(),
+			featureGates: map[featuregate.Feature]bool{features.KueueDRAIntegrationConsumableCapacity: false},
+			wantLogical:  map[corev1.ResourceName]resources.Amount{"example.com/shared": resources.NewAmount(2)},
+		},
+		"an unmapped exactly class is left for the caller to report": {
+			spec: utiltesting.NewResourceClaimSpecBuilder().
+				DeviceRequests(
+					testingdra.MakeDeviceRequest("r0", "fast.example.com", 2).Obj(),
+					testingdra.MakeDeviceRequest("r1", "unmapped.example.com", 1).Obj(),
+					testingdra.MakeDeviceRequest("r2", "other.example.com", 1).Obj(),
+				).
+				Build(),
+			wantLogical:  map[corev1.ResourceName]resources.Amount{"example.com/gpu": resources.NewAmount(2)},
+			wantUnmapped: "unmapped.example.com",
 		},
 		"a sum past the int64 range is kept exactly rather than saturated": {
 			spec: utiltesting.NewResourceClaimSpecBuilder().
@@ -2773,8 +2836,8 @@ func TestChargesForClaimSpec(t *testing.T) {
 			if diff := cmp.Diff(tc.wantLogical, got.perLogicalResource, cmp.Comparer(resources.Amount.Equal)); diff != "" {
 				t.Errorf("logical charges (-want +got):\n%s", diff)
 			}
-			if diff := cmp.Diff(tc.wantClasses, resources.ToMap(got.perDeviceClass)); diff != "" {
-				t.Errorf("class charges (-want +got):\n%s", diff)
+			if got.unmappedDeviceClass != tc.wantUnmapped {
+				t.Errorf("unmapped DeviceClass = %q, want %q", got.unmappedDeviceClass, tc.wantUnmapped)
 			}
 		})
 	}

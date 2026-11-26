@@ -73,10 +73,11 @@ func isAdminAccessRequest(req *resourcev1.ExactDeviceRequest) bool {
 
 // claimCharges is the quota cost of one ResourceClaimSpec.
 type claimCharges struct {
-	// perDeviceClass counts Exactly requests by DeviceClass; the caller maps them.
-	perDeviceClass resources.Requests
-	// perLogicalResource holds firstAvailable charges, which arrive mapped.
+	// perLogicalResource holds every charge, keyed by the mapped logical resource.
 	perLogicalResource map[corev1.ResourceName]resources.Amount
+	// unmappedDeviceClass is the first Exactly DeviceClass with no mapping; the caller
+	// reports it after the device check so the error keeps its podset context.
+	unmappedDeviceClass corev1.ResourceName
 }
 
 // chargesForClaimSpec classifies every request in the provided ResourceClaimSpec
@@ -85,7 +86,6 @@ type claimCharges struct {
 // AdminAccess requests and requests for excluded DeviceClasses are skipped (zero quota).
 func chargesForClaimSpec(claimSpec *resourcev1.ResourceClaimSpec, mapper *ResourceMapper) (claimCharges, field.ErrorList) {
 	charges := claimCharges{
-		perDeviceClass:     resources.NewRequests(),
 		perLogicalResource: map[corev1.ResourceName]resources.Amount{},
 	}
 	if claimSpec == nil {
@@ -166,8 +166,21 @@ func chargesForClaimSpec(claimSpec *resourcev1.ResourceClaimSpec, mapper *Resour
 		if dc == "" {
 			continue
 		}
+		logical, found := mapper.Lookup(dc)
+		if !found {
+			if charges.unmappedDeviceClass == "" {
+				charges.unmappedDeviceClass = dc
+			}
+			continue
+		}
+		if features.Enabled(features.KueueDRAIntegrationPartitionableDevices) && len(mapper.getCounterConfigs(dc)) > 0 {
+			continue
+		}
+		if features.Enabled(features.KueueDRAIntegrationConsumableCapacity) && len(mapper.getCapacityConfigs(dc)) > 0 {
+			continue
+		}
 		// Counts are user-controlled up to MaxInt64, and the sum is exact.
-		charges.perDeviceClass.Set(dc, charges.perDeviceClass.ResourceValue(dc).AddInt64(q))
+		charges.perLogicalResource[logical] = charges.perLogicalResource[logical].AddInt64(q)
 	}
 	return charges, nil
 }
@@ -347,28 +360,17 @@ func GetResourceRequestsForResourceClaimTemplates(
 				}
 			}
 
-			// firstAvailable charges arrive mapped. Emit them as whole units like the
-			// Exactly count below; a formatter would read a resource named cpu in milli.
-			for logical, amount := range charges.perLogicalResource {
-				aggregated = utilresource.MergeResourceListKeepSum(aggregated, corev1.ResourceList{logical: resource.MustParse(amount.String())})
+			if dc := charges.unmappedDeviceClass; dc != "" {
+				allErrs = append(allErrs, field.NotFound(
+					field.NewPath("spec", "podSets").Index(i).Child("template", "spec", "resourceClaims").Index(j).Child("resourceClaimTemplateName"),
+					fmt.Sprintf("DeviceClass %s is not mapped in DRA configuration for podset %s", dc, ps.Name),
+				))
+				return nil, allErrs
 			}
 
-			for dc, qty := range charges.perDeviceClass.Iter() {
-				logical, found := mapper.Lookup(dc)
-				if !found {
-					allErrs = append(allErrs, field.NotFound(
-						field.NewPath("spec", "podSets").Index(i).Child("template", "spec", "resourceClaims").Index(j).Child("resourceClaimTemplateName"),
-						fmt.Sprintf("DeviceClass %s is not mapped in DRA configuration for podset %s", dc, ps.Name),
-					))
-					return nil, allErrs
-				}
-				if features.Enabled(features.KueueDRAIntegrationPartitionableDevices) && len(mapper.getCounterConfigs(dc)) > 0 {
-					continue
-				}
-				if features.Enabled(features.KueueDRAIntegrationConsumableCapacity) && len(mapper.getCapacityConfigs(dc)) > 0 {
-					continue
-				}
-				aggregated = utilresource.MergeResourceListKeepSum(aggregated, corev1.ResourceList{logical: resource.MustParse(qty.String())})
+			// Emit charges as whole units; a formatter would read a resource named cpu in milli.
+			for logical, amount := range charges.perLogicalResource {
+				aggregated = utilresource.MergeResourceListKeepSum(aggregated, corev1.ResourceList{logical: resource.MustParse(amount.String())})
 			}
 		}
 
