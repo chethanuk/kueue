@@ -1737,7 +1737,8 @@ var _ = ginkgo.Describe("Scheduler", ginkgo.Label("feature:fairsharing"), func()
 			ginkgo.By("Admitting a workload so the LocalQueue accrues AFS consumed usage")
 			wl := createWorkload("lq-a", "4")
 			behavioral.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, wl)
-			behavioral.ExpectLocalQueueFairSharingUsageToBe(ctx, k8sClient, client.ObjectKeyFromObject(lqA), ">", 0)
+			// Snapshot only after usage nears the 2000m entry penalty, so the decay below it fits in the Timeout.
+			behavioral.ExpectLocalQueueFairSharingUsageToBe(ctx, k8sClient, client.ObjectKeyFromObject(lqA), ">", 1_900)
 
 			ginkgo.By("Holding the ClusterQueue so admitted workloads keep running")
 			behavioral.SetClusterQueueStopPolicy(ctx, k8sClient, cq1, kueue.Hold)
