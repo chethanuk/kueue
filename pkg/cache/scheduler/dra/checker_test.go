@@ -214,18 +214,8 @@ func TestCheckerFindFeasibleNodes(t *testing.T) {
 	mixedNode := &corev1.Node{
 		Name: "mixed-node",
 	}
-	fullClass := &resourceapi.DeviceClass{
-		Name: "full.example.com",
-		Spec: resourceapi.DeviceClassSpec{
-			Selectors: []resourceapi.DeviceSelector{{CEL: &resourceapi.CELDeviceSelector{Expression: `device.driver == "full.example.com"`}}},
-		},
-	}
-	sliceClass := &resourceapi.DeviceClass{
-		Name: "slice.example.com",
-		Spec: resourceapi.DeviceClassSpec{
-			Selectors: []resourceapi.DeviceSelector{{CEL: &resourceapi.CELDeviceSelector{Expression: `device.driver == "slice.example.com"`}}},
-		},
-	}
+	fullClass := testingdra.MakeDeviceClass("full.example.com").CELSelector(`device.driver == "full.example.com"`).Obj()
+	sliceClass := testingdra.MakeDeviceClass("slice.example.com").CELSelector(`device.driver == "slice.example.com"`).Obj()
 	fullSlice := testingdra.MakeResourceSlice("mixed-node-full", "full.example.com").
 		NodeName("mixed-node").
 		Pool("full-pool", 1, 1).

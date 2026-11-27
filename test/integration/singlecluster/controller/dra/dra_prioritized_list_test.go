@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/kueue/test/util/behavioral"
 )
 
-var _ = ginkgo.Describe("DRA Prioritized List Integration", func() {
+var _ = ginkgo.Describe("DRA firstAvailable Integration", func() {
 	ginkgo.BeforeEach(func() {
 		features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.KueueDRAIntegrationPrioritizedList, true)
 		fwk.StartManagerForSpec(ctx, cfg, managerSetup(func(c *config.Configuration) {

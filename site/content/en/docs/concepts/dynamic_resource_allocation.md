@@ -540,7 +540,7 @@ The following limitations apply:
   holds its quota until the Workload is
   evicted, for example by
   [WaitForPodsReady](/docs/tasks/manage/setup_wait_for_pods_ready/) where it is
-  configured; with it, such a Workload stays pending instead. The charge lands
+  configured; with it, on a TAS ResourceFlavor, such a Workload stays pending instead. The charge lands
   on the one ResourceFlavor the PodSet is assigned, and the Pods carry that
   flavor's node labels, so keep every alternative's devices behind the same
   flavors; with a flavor per device model, only the alternative with devices on
