@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"maps"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,7 +38,7 @@ import (
 
 // PreemptionConfigReconciler retries the inadmissible Workloads of the
 // ClusterQueues that reference a PreemptionConfig when that PreemptionConfig
-// is created, deleted, or its rules change.
+// is created, deleted, or its rules or labels change.
 type PreemptionConfigReconciler struct {
 	qManager    *qcache.Manager
 	cache       *schdcache.Cache
@@ -68,10 +69,12 @@ func (r *PreemptionConfigReconciler) Create(event.TypedCreateEvent[*kueuealpha.P
 	return true
 }
 
-// Update only lets through spec changes. PreemptionConfig has no status
-// subresource, so the generation changes only when the rules change.
+// Update lets through spec and label changes. PreemptionConfig has no status
+// subresource, so the generation changes only when the rules change. Labels
+// matter because a PreemptionLimit configSelector matches PreemptionConfigs by label.
 func (r *PreemptionConfigReconciler) Update(e event.TypedUpdateEvent[*kueuealpha.PreemptionConfig]) bool {
-	return e.ObjectOld.Generation != e.ObjectNew.Generation
+	return e.ObjectOld.Generation != e.ObjectNew.Generation ||
+		!maps.Equal(e.ObjectOld.Labels, e.ObjectNew.Labels)
 }
 
 func (r *PreemptionConfigReconciler) Delete(event.TypedDeleteEvent[*kueuealpha.PreemptionConfig]) bool {
