@@ -158,7 +158,7 @@ func TestPreemptionConfigReconciler_Predicates(t *testing.T) {
 			},
 			want: true,
 		},
-		"update without a spec change": {
+		"update with a label-only change": {
 			event: event.TypedUpdateEvent[*kueuealpha.PreemptionConfig]{
 				ObjectOld: config(1).Obj(),
 				ObjectNew: func() *kueuealpha.PreemptionConfig {
@@ -166,6 +166,35 @@ func TestPreemptionConfigReconciler_Predicates(t *testing.T) {
 					pc.Labels = map[string]string{"team": "ml"}
 					return pc
 				}(),
+			},
+			want: true,
+		},
+		"update removing all labels": {
+			event: event.TypedUpdateEvent[*kueuealpha.PreemptionConfig]{
+				ObjectOld: func() *kueuealpha.PreemptionConfig {
+					pc := config(1).Obj()
+					pc.Labels = map[string]string{"team": "ml"}
+					return pc
+				}(),
+				ObjectNew: config(1).Obj(),
+			},
+			want: true,
+		},
+		"update with an annotation-only change": {
+			event: event.TypedUpdateEvent[*kueuealpha.PreemptionConfig]{
+				ObjectOld: config(1).Obj(),
+				ObjectNew: func() *kueuealpha.PreemptionConfig {
+					pc := config(1).Obj()
+					pc.Annotations = map[string]string{"note": "x"}
+					return pc
+				}(),
+			},
+			want: false,
+		},
+		"update without any change": {
+			event: event.TypedUpdateEvent[*kueuealpha.PreemptionConfig]{
+				ObjectOld: config(1).Obj(),
+				ObjectNew: config(1).Obj(),
 			},
 			want: false,
 		},

@@ -289,6 +289,33 @@ var _ = ginkgo.Describe("PreemptionLimits", ginkgo.Label("feature:configurablepr
 					})
 				})
 			})
+
+			ginkgo.It("should requeue blocked workloads when the PreemptionConfig stops matching the limit's configSelector", func() {
+				var lowWl1, lowWl2, highWl *kueue.Workload
+
+				ginkgo.By("Admitting two low-priority workloads that saturate the ClusterQueue", func() {
+					lowWl1 = createWorkload("low-1", lq.Name, 10, "1")
+					lowWl2 = createWorkload("low-2", lq.Name, 20, "1")
+					behavioral.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, lowWl1, lowWl2)
+				})
+
+				ginkgo.By("Blocking preemption while the PreemptionConfig matches the limit", func() {
+					highWl = createWorkload("high", lq.Name, 100, "1")
+					behavioral.ExpectWorkloadsToBePending(ctx, k8sClient, highWl)
+					expectWorkloadsNotEvictedConsistently(lowWl1, lowWl2)
+				})
+
+				ginkgo.By("Removing the PreemptionConfig label so highWl is automatically requeued and preempts", func() {
+					gomega.Eventually(func(g gomega.Gomega) {
+						g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(config), config)).To(gomega.Succeed())
+						delete(config.Labels, "rollout")
+						g.Expect(k8sClient.Update(ctx, config)).To(gomega.Succeed())
+					}, behavioral.Timeout, behavioral.ShortInterval).Should(gomega.Succeed())
+
+					behavioral.FinishEvictionForWorkloads(ctx, k8sClient, lowWl1)
+					behavioral.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, highWl)
+				})
+			})
 		})
 
 		ginkgo.When("protecting a workload from too many disruptions", func() {
