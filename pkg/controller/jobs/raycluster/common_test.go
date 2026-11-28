@@ -993,6 +993,60 @@ func TestUpdatePodSets(t *testing.T) {
 					Obj(), // 4 replicas * 2 hosts = 8
 			},
 		},
+		"worker group with nil Replicas is skipped": {
+			podSets: []kueue.PodSet{
+				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),
+				*utiltestingapi.MakePodSet("workers", 3).Obj(),
+				*utiltestingapi.MakePodSet("workers-2", 1).Obj(),
+			},
+			object: testingrayutil.MakeCluster("raycluster", "ns").
+				SetAnnotation("kueue.x-k8s.io/elastic-job", "true").
+				WithEnableAutoscaling(new(true)).
+				Obj(),
+			enableInTreeAutoscaling: new(true),
+			rayClusterName:          "target-raycluster",
+			rayClusterInClient: testingrayutil.MakeCluster("target-raycluster", "ns").
+				WithWorkerGroups(rayv1.WorkerGroupSpec{
+					GroupName: "workers", MinReplicas: new(int32(2)), MaxReplicas: new(int32(8)),
+				}, rayv1.WorkerGroupSpec{
+					GroupName: "workers-2", Replicas: new(int32(4)),
+				}).Obj(),
+			wantPodSets: []kueue.PodSet{
+				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),
+				*utiltestingapi.MakePodSet("workers", 3).Obj(),
+				*utiltestingapi.MakePodSet("workers-2", 4).
+					PodIndexLabel(new(rayutils.RayWorkerReplicaIndexKey)).
+					SubGroupCount(new(int32(4))).
+					Obj(),
+			},
+		},
+		"count change rebuilds the topology request from the RayCluster worker group": {
+			podSets: []kueue.PodSet{
+				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),
+				*utiltestingapi.MakePodSet("workers", 3).Obj(),
+			},
+			object: testingrayutil.MakeCluster("raycluster", "ns").
+				SetAnnotation("kueue.x-k8s.io/elastic-job", "true").
+				WithEnableAutoscaling(new(true)).
+				Obj(),
+			enableInTreeAutoscaling: new(true),
+			rayClusterName:          "target-raycluster",
+			rayClusterInClient: testingrayutil.MakeCluster("target-raycluster", "ns").
+				WithWorkerGroups(rayv1.WorkerGroupSpec{
+					GroupName: "workers", Replicas: new(int32(5)),
+					Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{kueue.PodSetRequiredTopologyAnnotation: "cloud.com/block"},
+					}},
+				}).Obj(),
+			wantPodSets: []kueue.PodSet{
+				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),
+				*utiltestingapi.MakePodSet("workers", 5).
+					RequiredTopologyRequest("cloud.com/block").
+					PodIndexLabel(new(rayutils.RayWorkerReplicaIndexKey)).
+					SubGroupCount(new(int32(5))).
+					Obj(),
+			},
+		},
 		"podset name mismatch": {
 			podSets: []kueue.PodSet{
 				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),

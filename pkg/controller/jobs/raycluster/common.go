@@ -283,80 +283,79 @@ func ExpectedPodSetsCount(rayClusterSpec *rayv1.RayClusterSpec) int {
 }
 
 func UpdatePodSets(ctx context.Context, podSets []kueue.PodSet, c client.Client, object client.Object, enableInTreeAutoscaling *bool, rayClusterName string) ([]kueue.PodSet, error) {
-	log := ctrl.LoggerFrom(ctx)
-
-	// Only update podSets from RayCluster if:
-	// 1. The service is workload slicing enabled
-	// 2. AND the service has enableInTreeAutoscaling
-	if workloadslicing.Enabled(object) && ptr.Deref(enableInTreeAutoscaling, false) {
-		// If rayClusterName is set, try to fetch the RayCluster and update PodSets from it
-		if rayClusterName != "" {
-			var rayClusterObj rayv1.RayCluster
-			err := c.Get(ctx, types.NamespacedName{
-				Namespace: object.GetNamespace(),
-				Name:      rayClusterName,
-			}, &rayClusterObj)
-			if err != nil {
-				// Check if the error is a NotFound error
-				if apierrors.IsNotFound(err) {
-					log.V(3).Info("RayCluster not found, skipping PodSet count update from RayCluster",
-						"rayCluster", klog.KRef(object.GetNamespace(), rayClusterName))
-					// On a MultiKueue manager the child RayCluster only exists on
-					// the worker cluster; its per-group counts are reflected here
-					// as an annotation by the MultiKueue workload controller.
-					// Anywhere else NotFound is transient (the child is not
-					// created yet) and the spec-derived counts stand.
-					if isManagedByMultiKueue(object) {
-						return applyRuntimeCountsAnnotation(log, podSets, object), nil
-					}
-					return podSets, nil
-				}
-				return nil, fmt.Errorf("failed to get RayCluster %s: %w", rayClusterName, err)
-			} else {
-				// Create a map of podSets from Ray object spec for quick lookup by name
-				podSetMap := make(map[kueue.PodSetReference]*kueue.PodSet)
-				for i := range podSets {
-					podSetMap[podSets[i].Name] = &podSets[i]
-				}
-
-				// Iterate through RayCluster's worker groups and update the count in matching podSets
-				for i := range rayClusterObj.Spec.WorkerGroupSpecs {
-					wgs := &rayClusterObj.Spec.WorkerGroupSpecs[i]
-					podSetName := kueue.NewPodSetReference(wgs.GroupName)
-
-					podSet, exists := podSetMap[podSetName]
-					if !exists {
-						return nil, fmt.Errorf("%w: RayCluster %s has worker group %s which is not found in Ray object %s spec", errPodSetNameMismatch, rayClusterName, wgs.GroupName, object.GetName())
-					}
-
-					if wgs.Replicas == nil {
-						continue
-					}
-
-					count := effectiveWorkerCount(wgs)
-
-					// Update the count in the PodSet only if it's different
-					if podSet.Count != count {
-						log.V(4).Info("Updated PodSet worker count from RayCluster",
-							"rayCluster", klog.KRef(object.GetNamespace(), rayClusterName),
-							"workerGroup", wgs.GroupName,
-							"previousCount", podSet.Count,
-							"count", count)
-						podSet.Count = count
-						if features.Enabled(features.TopologyAwareScheduling) {
-							topologyRequest, err := buildWorkerTopologyRequest(wgs)
-							if err != nil {
-								return nil, err
-							}
-							podSet.TopologyRequest = topologyRequest
-						}
-					}
-				}
-			}
-		}
+	// Only update podSets from RayCluster if the object is workload slicing
+	// enabled, has enableInTreeAutoscaling, and names its RayCluster.
+	if !workloadslicing.Enabled(object) || !ptr.Deref(enableInTreeAutoscaling, false) || rayClusterName == "" {
+		return podSets, nil
 	}
 
+	log := ctrl.LoggerFrom(ctx)
+	var rayClusterObj rayv1.RayCluster
+	err := c.Get(ctx, types.NamespacedName{
+		Namespace: object.GetNamespace(),
+		Name:      rayClusterName,
+	}, &rayClusterObj)
+	if apierrors.IsNotFound(err) {
+		log.V(3).Info("RayCluster not found, skipping PodSet count update from RayCluster",
+			"rayCluster", klog.KRef(object.GetNamespace(), rayClusterName))
+		// On a MultiKueue manager the child RayCluster only exists on
+		// the worker cluster; its per-group counts are reflected here
+		// as an annotation by the MultiKueue workload controller.
+		// Anywhere else NotFound is transient (the child is not
+		// created yet) and the spec-derived counts stand.
+		if isManagedByMultiKueue(object) {
+			return applyRuntimeCountsAnnotation(log, podSets, object), nil
+		}
+		return podSets, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get RayCluster %s: %w", rayClusterName, err)
+	}
+
+	if err := updateWorkerCountsFromRayCluster(log, podSets, object, &rayClusterObj); err != nil {
+		return nil, err
+	}
 	return podSets, nil
+}
+
+// updateWorkerCountsFromRayCluster sets the count of each worker PodSet to the
+// effective replicas of the matching RayCluster worker group, rebuilding the
+// topology request when TAS is enabled and the count changed.
+func updateWorkerCountsFromRayCluster(log logr.Logger, podSets []kueue.PodSet, object client.Object, rayCluster *rayv1.RayCluster) error {
+	podSetMap := make(map[kueue.PodSetReference]*kueue.PodSet, len(podSets))
+	for i := range podSets {
+		podSetMap[podSets[i].Name] = &podSets[i]
+	}
+
+	for i := range rayCluster.Spec.WorkerGroupSpecs {
+		wgs := &rayCluster.Spec.WorkerGroupSpecs[i]
+		podSet, exists := podSetMap[kueue.NewPodSetReference(wgs.GroupName)]
+		if !exists {
+			return fmt.Errorf("%w: RayCluster %s has worker group %s which is not found in Ray object %s spec", errPodSetNameMismatch, rayCluster.Name, wgs.GroupName, object.GetName())
+		}
+		if wgs.Replicas == nil {
+			continue
+		}
+
+		count := effectiveWorkerCount(wgs)
+		if podSet.Count == count {
+			continue
+		}
+		log.V(4).Info("Updated PodSet worker count from RayCluster",
+			"rayCluster", klog.KRef(object.GetNamespace(), rayCluster.Name),
+			"workerGroup", wgs.GroupName,
+			"previousCount", podSet.Count,
+			"count", count)
+		podSet.Count = count
+		if features.Enabled(features.TopologyAwareScheduling) {
+			topologyRequest, err := buildWorkerTopologyRequest(wgs)
+			if err != nil {
+				return err
+			}
+			podSet.TopologyRequest = topologyRequest
+		}
+	}
+	return nil
 }
 
 func UpdateRayClusterSpecToRunWithPodSetsInfo(log logr.Logger, rayClusterSpec *rayv1.RayClusterSpec, podSetsInfo []podset.PodSetInfo) error {
